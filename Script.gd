@@ -16,6 +16,8 @@ const ENEMY_CAP        := 25
 const MIN_SPAWN_DISTANCE := 240.0
 const UI_MARGIN        := 24.0
 
+const VIRTUAL_SIZE := Vector2(1280, 720)
+
 const KEY_SPEED       := 600.0 * SPEED_SCALE
 const KEY_ACCEL       := 3600.0 * SPEED_SCALE
 const MOUSE_SPEED_CAP := 600.0 * SPEED_SCALE
@@ -80,15 +82,13 @@ const POWERUP_PICKUP_RADIUS := 34.0
 const POWERUP_DURATION := 5.0
 const POWERUP_MAGNET_RANGE := 440.0
 const POWERUP_MAGNET_SPEED := 500.0 * SPEED_SCALE
-const POWERUP_PITY_KILLS := 20  # NEW: guaranteed drop after this many dry kills
+const POWERUP_PITY_KILLS := 20
 
-# NEW: dash tuning
 const DASH_SPEED         := 1400.0 * SPEED_SCALE
 const DASH_TIME          := 0.16
 const DASH_COOLDOWN      := 1.2
 const DASH_IFRAME_GRACE  := 0.06
 
-# NEW: combo & juice
 const COMBO_WINDOW       := 3.0
 const HITSTOP_TIME       := 0.05
 const DEATH_SLOWMO_TIME  := 0.45
@@ -223,6 +223,8 @@ const NO_TIER_UPGRADES := [
 const SAVE_PATH := "user://cursor_chaos.json"
 
 var screen: Vector2
+var view_scale := 1.0
+var view_offset := Vector2.ZERO
 var play_rect := Rect2()
 var dot_pos: Vector2
 var dot_trail: Array = []
@@ -337,13 +339,11 @@ var achv_stats := {}
 var _achv_check_timer := 0.0
 var achv_back_rect := Rect2()
 
-# NEW: dash state
 var dash_timer := 0.0
 var dash_cooldown := 0.0
 var dash_dir := Vector2.ZERO
 var dash_trail: Array = []
 
-# NEW: combo & juice state
 var combo_count := 0
 var combo_timer := 0.0
 var hitstop_timer := 0.0
@@ -391,8 +391,7 @@ var file_dialog_target := ""
 
 func _ready() -> void:
 	_game_started_at = Time.get_ticks_msec() / 1000.0
-	screen = get_viewport_rect().size
-	_compute_play_rect()
+	_update_view()
 	dot_pos = play_rect.get_center()
 	font = ThemeDB.fallback_font
 	menu_bg_seed = randi()
@@ -428,12 +427,24 @@ func _default_achv_stats() -> Dictionary:
 	}
 
 func _on_size_changed() -> void:
-	screen = get_viewport_rect().size
+	_update_view()
+
+func _update_view() -> void:
+	var real := get_viewport_rect().size
+	view_scale = minf(real.x / VIRTUAL_SIZE.x, real.y / VIRTUAL_SIZE.y)
+	view_offset = (real - VIRTUAL_SIZE * view_scale) * 0.5
+	screen = VIRTUAL_SIZE
 	_compute_play_rect()
 
 func _compute_play_rect() -> void:
 	play_rect = Rect2(BORDER_MARGIN, BORDER_MARGIN,
 		screen.x - BORDER_MARGIN * 2.0, screen.y - BORDER_MARGIN * 2.0)
+
+func _screen_to_virtual(p: Vector2) -> Vector2:
+	return (p - view_offset) / view_scale
+
+func _mouse_virtual() -> Vector2:
+	return _screen_to_virtual(get_global_mouse_position())
 
 func _set_mouse_visible(v: bool) -> void:
 	Input.set_mouse_mode(Input.MOUSE_MODE_VISIBLE if v else Input.MOUSE_MODE_HIDDEN)
@@ -572,19 +583,61 @@ func _load_custom_bg_texture(path: String) -> void:
 	if img == null: return
 	custom_bg_texture = ImageTexture.create_from_image(img)
 
+# NEW: orb texture is fit-to-square and circular-masked at load
 func _load_custom_orb_texture(path: String) -> void:
 	custom_orb_texture = null
 	if path == "" or not FileAccess.file_exists(path): return
 	var img := Image.load_from_file(path)
 	if img == null: return
-	custom_orb_texture = ImageTexture.create_from_image(img)
+	img.convert(Image.FORMAT_RGBA8)
+	var max_side := 128
+	if maxi(img.get_width(), img.get_height()) > max_side:
+		var s := float(max_side) / float(maxi(img.get_width(), img.get_height()))
+		img.resize(maxi(1, int(img.get_width() * s)), maxi(1, int(img.get_height() * s)), Image.INTERPOLATE_LANCZOS)
+	var sz := maxi(img.get_width(), img.get_height())
+	var square := Image.create(sz, sz, false, Image.FORMAT_RGBA8)
+	square.fill(Color(0, 0, 0, 0))
+	var dst := Vector2i((sz - img.get_width()) / 2, (sz - img.get_height()) / 2)
+	square.blit_rect(img, Rect2i(Vector2i.ZERO, img.get_size()), dst)
+	var r := sz * 0.5
+	for y in sz:
+		for x in sz:
+			var d := Vector2(x + 0.5 - r, y + 0.5 - r).length()
+			if d > r:
+				square.set_pixel(x, y, Color(0, 0, 0, 0))
+			elif d > r - 1.5:
+				var c := square.get_pixel(x, y)
+				c.a *= clampf(r - d, 0.0, 1.0)
+				square.set_pixel(x, y, c)
+	custom_orb_texture = ImageTexture.create_from_image(square)
 
+# NEW: trail texture is fit-to-square and circular-masked at load
 func _load_custom_trail_texture(path: String) -> void:
 	custom_trail_texture = null
 	if path == "" or not FileAccess.file_exists(path): return
 	var img := Image.load_from_file(path)
 	if img == null: return
-	custom_trail_texture = ImageTexture.create_from_image(img)
+	img.convert(Image.FORMAT_RGBA8)
+	var max_side := 128
+	if maxi(img.get_width(), img.get_height()) > max_side:
+		var s := float(max_side) / float(maxi(img.get_width(), img.get_height()))
+		img.resize(maxi(1, int(img.get_width() * s)), maxi(1, int(img.get_height() * s)), Image.INTERPOLATE_LANCZOS)
+	var sz := maxi(img.get_width(), img.get_height())
+	var square := Image.create(sz, sz, false, Image.FORMAT_RGBA8)
+	square.fill(Color(0, 0, 0, 0))
+	var dst := Vector2i((sz - img.get_width()) / 2, (sz - img.get_height()) / 2)
+	square.blit_rect(img, Rect2i(Vector2i.ZERO, img.get_size()), dst)
+	var r := sz * 0.5
+	for y in sz:
+		for x in sz:
+			var d := Vector2(x + 0.5 - r, y + 0.5 - r).length()
+			if d > r:
+				square.set_pixel(x, y, Color(0, 0, 0, 0))
+			elif d > r - 1.5:
+				var c := square.get_pixel(x, y)
+				c.a *= clampf(r - d, 0.0, 1.0)
+				square.set_pixel(x, y, c)
+	custom_trail_texture = ImageTexture.create_from_image(square)
 
 func _load_custom_bg(path: String) -> void:
 	_load_custom_bg_texture(path)
@@ -603,7 +656,6 @@ func _reset_custom_bg() -> void:
 func _maybe_drop_powerup(at: Vector2) -> void:
 	if current_mode == "duel": return
 	kills_since_powerup += 1
-	# NEW: pity timer forces a drop after too many dry kills
 	var chance := POWERUP_DROP_CHANCE * float(active_effects["drop_mult"])
 	var force := kills_since_powerup >= POWERUP_PITY_KILLS
 	if not force and randf() > chance: return
@@ -632,13 +684,11 @@ func _show_toast(msg: String) -> void:
 	toast_message = msg
 	toast_timer = 2.5
 
-# NEW: floating text popups
 func _float_text(at: Vector2, msg: String, col: Color) -> void:
 	text_particles.append({
 		"pos": at, "text": msg, "life": 0.8, "max": 0.8, "col": col,
 	})
 
-# NEW: combo tracking
 func _add_combo() -> void:
 	combo_count += 1
 	combo_timer = COMBO_WINDOW
@@ -653,7 +703,6 @@ func _streak_callout(txt: String) -> void:
 	streak_callout_text = txt
 	streak_callout_timer = 1.6
 
-# NEW: single source of truth for invulnerability
 func _is_invulnerable() -> bool:
 	return shield_timer > 0.0 or dash_timer > 0.0 or death_slowmo_timer > 0.0
 
@@ -727,7 +776,6 @@ func _setup_audio() -> void:
 	default_sfx["death"] = _make_sweep(660, 110, 0.55, 0.45, true)
 	default_sfx["wave"] = _make_sound(523, 0.12, "sine", 0.22)
 	default_sfx["win"] = _make_sweep(440, 880, 0.75, 0.38, false)
-	# NEW: dash whoosh
 	default_sfx["dash"] = _make_noise(0.10, 0.20)
 	default_music = _make_music_loop()
 	music_player = AudioStreamPlayer.new()
@@ -746,6 +794,7 @@ func _setup_file_dialog() -> void:
 	file_dialog.filters = PackedStringArray(["*.ogg, *.mp3, *.wav ; Audio Files"])
 	file_dialog.use_native_dialog = false
 	file_dialog.file_selected.connect(_on_file_selected)
+	file_dialog.canceled.connect(func(): file_dialog_target = "")
 	add_child(file_dialog)
 
 func _on_file_selected(path: String) -> void:
@@ -905,7 +954,7 @@ func _input(event: InputEvent) -> void:
 			joy_p1_active = false
 			joy_p2_active = false
 	if event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_LEFT:
-		_handle_click(event.position); return
+		_handle_click(_screen_to_virtual(event.position)); return
 	if state == State.SHOP and event is InputEventMouseButton and event.pressed:
 		if event.button_index == MOUSE_BUTTON_WHEEL_DOWN:
 			shop_scroll += 40.0
@@ -931,27 +980,28 @@ func _input(event: InputEvent) -> void:
 
 func _handle_touch(event: InputEvent) -> void:
 	if state != State.PLAY: return
+	var vpos := _screen_to_virtual(event.position)
 	if current_mode == "duel":
 		if event is InputEventScreenTouch:
 			if event.pressed:
-				if event.position.x < screen.x * 0.5:
+				if vpos.x < screen.x * 0.5:
 					if not joy_p1_active:
 						joy_p1_active = true; joy_p1_index = event.index
-						joy_p1_base = event.position; joy_p1_vec = Vector2.ZERO
+						joy_p1_base = vpos; joy_p1_vec = Vector2.ZERO
 				else:
 					if not joy_p2_active:
 						joy_p2_active = true; joy_p2_index = event.index
-						joy_p2_base = event.position; joy_p2_vec = Vector2.ZERO
+						joy_p2_base = vpos; joy_p2_vec = Vector2.ZERO
 			else:
 				if event.index == joy_p1_index: joy_p1_active = false; joy_p1_index = -1; joy_p1_vec = Vector2.ZERO
 				if event.index == joy_p2_index: joy_p2_active = false; joy_p2_index = -1; joy_p2_vec = Vector2.ZERO
 		elif event is InputEventScreenDrag:
 			if event.index == joy_p1_index:
-				var d: Vector2 = event.position - joy_p1_base
+				var d: Vector2 = vpos - joy_p1_base
 				if d.length() > JOY_RADIUS: d = d.normalized() * JOY_RADIUS
 				joy_p1_vec = d / JOY_RADIUS
 			elif event.index == joy_p2_index:
-				var d: Vector2 = event.position - joy_p2_base
+				var d: Vector2 = vpos - joy_p2_base
 				if d.length() > JOY_RADIUS: d = d.normalized() * JOY_RADIUS
 				joy_p2_vec = d / JOY_RADIUS
 		return
@@ -961,21 +1011,21 @@ func _handle_touch(event: InputEvent) -> void:
 			if want_joy:
 				if not joy_active:
 					joy_active = true; joy_index = event.index
-					joy_base = event.position; joy_vec = Vector2.ZERO
+					joy_base = vpos; joy_vec = Vector2.ZERO
 					touch_to_go = false
 			else:
-				touch_target = event.position
+				touch_target = vpos
 				touch_to_go = true
 		else:
 			if joy_active and event.index == joy_index:
 				joy_active = false; joy_index = -1; joy_vec = Vector2.ZERO
 	elif event is InputEventScreenDrag:
 		if joy_active and event.index == joy_index:
-			var d: Vector2 = event.position - joy_base
+			var d: Vector2 = vpos - joy_base
 			if d.length() > JOY_RADIUS: d = d.normalized() * JOY_RADIUS
 			joy_vec = d / JOY_RADIUS
 		elif touch_to_go:
-			touch_target = event.position
+			touch_target = vpos
 
 func _handle_click(p: Vector2) -> void:
 	match state:
@@ -988,7 +1038,6 @@ func _handle_click(p: Vector2) -> void:
 						"shop": _transition_to(_open_shop)
 						"achievements": _transition_to(_open_achievements)
 						"quit":
-							# NEW: save before quit
 							_save_scores()
 							get_tree().quit()
 						_: _transition_to(func(): _start_mode(mode))
@@ -1143,33 +1192,30 @@ func _buy_no_tier(index: int) -> void:
 		_save_scores()
 
 func _buy_custom_orb() -> void:
-	if custom_orb_texture != null:
-		if not CUSTOM_ORB_ID in owned_skins: owned_skins.append(CUSTOM_ORB_ID)
+	# Already owned -> always let the player re-pick the image
+	if CUSTOM_ORB_ID in owned_skins:
 		current_skin = CUSTOM_ORB_ID
 		_save_scores()
-		return
-	if CUSTOM_ORB_ID in owned_skins:
 		_open_file_dialog("orb")
 		return
 	if money < CUSTOM_ORB_PRICE: return
 	money -= CUSTOM_ORB_PRICE
 	owned_skins.append(CUSTOM_ORB_ID)
+	current_skin = CUSTOM_ORB_ID
 	_open_file_dialog("orb")
 
 func _buy_custom_trail() -> void:
-	if custom_trail_texture != null:
-		if not CUSTOM_TRAIL_ID in owned_trails: owned_trails.append(CUSTOM_TRAIL_ID)
+	# Already owned -> always let the player re-pick the image
+	if CUSTOM_TRAIL_ID in owned_trails:
 		current_trail = CUSTOM_TRAIL_ID
 		_save_scores()
-		return
-	if CUSTOM_TRAIL_ID in owned_trails:
 		_open_file_dialog("trail")
 		return
 	if money < CUSTOM_TRAIL_PRICE: return
 	money -= CUSTOM_TRAIL_PRICE
 	owned_trails.append(CUSTOM_TRAIL_ID)
+	current_trail = CUSTOM_TRAIL_ID
 	_open_file_dialog("trail")
-
 func _start_mode(mode: String) -> void:
 	if mode == "classic":
 		_open_classic_slots()
@@ -1227,7 +1273,6 @@ func _reset_play() -> void:
 	run_time = 0.0; speedrun_time = 0.0; waveless_time = 0.0
 	_hazard_timer = 1.0; shake = 0.0
 	dot_pos = play_rect.get_center(); key_vel = Vector2.ZERO
-	# NEW: reset dash + combo state
 	dash_timer = 0.0; dash_cooldown = 0.0; dash_dir = Vector2.ZERO
 	combo_count = 0; combo_timer = 0.0; hitstop_timer = 0.0
 	death_slowmo_timer = 0.0; kills_since_powerup = 0
@@ -1314,7 +1359,6 @@ func _process(delta: float) -> void:
 	match state:
 		State.PLAY:
 			if wave_announce_timer > 0.0: wave_announce_timer = max(0.0, wave_announce_timer - delta)
-			# NEW: hit-stop and death slow-mo gate the tick
 			if hitstop_timer > 0.0:
 				hitstop_timer = max(0.0, hitstop_timer - delta)
 			elif death_slowmo_timer > 0.0:
@@ -1334,7 +1378,6 @@ func _process(delta: float) -> void:
 			_update_particles(delta); _update_text_particles(delta); _update_dash_trail(delta)
 	queue_redraw()
 
-# NEW: text particle updater
 func _update_text_particles(delta: float) -> void:
 	var keep: Array = []
 	for tp in text_particles:
@@ -1344,7 +1387,6 @@ func _update_text_particles(delta: float) -> void:
 			keep.append(tp)
 	text_particles = keep
 
-# NEW: dash trail updater
 func _update_dash_trail(delta: float) -> void:
 	var keep: Array = []
 	for dt in dash_trail:
@@ -1354,14 +1396,11 @@ func _update_dash_trail(delta: float) -> void:
 
 func _game_tick(delta: float) -> void:
 	if current_mode == "duel": _tick_duel(delta); return
-	# NEW: tick dash cooldown / timers
 	if dash_cooldown > 0.0: dash_cooldown = max(0.0, dash_cooldown - delta)
 	if dash_timer > 0.0:
 		dash_timer = max(0.0, dash_timer - delta)
-		# dash movement overrides normal movement
 		dot_pos += dash_dir * DASH_SPEED * delta
 		dash_trail.append({"pos": dot_pos, "life": 0.25})
-	# NEW: trigger dash on Space (ui_accept) when not on cooldown
 	if dash_timer <= 0.0 and dash_cooldown <= 0.0 and Input.is_action_just_pressed("ui_accept"):
 		var dd := Vector2.ZERO
 		if joy_active:
@@ -1372,7 +1411,7 @@ func _game_tick(delta: float) -> void:
 			if Input.is_action_pressed("ui_up") or Input.is_key_pressed(KEY_W): dd.y -= 1.0
 			if Input.is_action_pressed("ui_down") or Input.is_key_pressed(KEY_S): dd.y += 1.0
 		if dd.length() < 0.1:
-			dd = (get_global_mouse_position() - dot_pos)
+			dd = _mouse_virtual() - dot_pos
 			if dd.length() < 0.1: dd = Vector2.RIGHT
 		dash_dir = dd.normalized()
 		dash_timer = DASH_TIME
@@ -1381,7 +1420,6 @@ func _game_tick(delta: float) -> void:
 		shake = max(shake, 4.0 if settings["screen_shake"] else 0.0)
 	var move_speed: float = KEY_SPEED * float(active_effects["speed_mult"])
 	if dash_timer > 0.0:
-		# already moved above; skip normal movement this frame
 		pass
 	elif joy_active:
 		var speed_cap: float = MOUSE_SPEED_CAP * float(active_effects["speed_mult"])
@@ -1403,7 +1441,7 @@ func _game_tick(delta: float) -> void:
 		key_vel = key_vel.move_toward(dir * move_speed, KEY_ACCEL * delta)
 		dot_pos += key_vel * delta
 	else:
-		var target := get_global_mouse_position()
+		var target := _mouse_virtual()
 		var diff := target - dot_pos
 		var dist := diff.length()
 		var max_move := MOUSE_SPEED_CAP * float(active_effects["speed_mult"]) * delta
@@ -1412,7 +1450,7 @@ func _game_tick(delta: float) -> void:
 	dot_pos.x = clampf(dot_pos.x, play_rect.position.x + DOT_RADIUS, play_rect.end.x - DOT_RADIUS)
 	dot_pos.y = clampf(dot_pos.y, play_rect.position.y + DOT_RADIUS, play_rect.end.y - DOT_RADIUS)
 	if not joy_active and not touch_to_go and not bool(settings["arrow_keys"]):
-		Input.warp_mouse(dot_pos)
+		Input.warp_mouse(view_offset + dot_pos * view_scale)
 
 	dot_trail.append({"pos": dot_pos, "age": 0.0})
 	for i in range(dot_trail.size() - 1, -1, -1):
@@ -1467,7 +1505,6 @@ func _game_tick(delta: float) -> void:
 			spd *= 1.0 - float(active_effects["slow_field"])
 		if to_dot.length() > 0.01:
 			e["pos"] += to_dot.normalized() * spd * delta
-		# NEW: near-miss reward
 		var d_enemy := (e["pos"] as Vector2).distance_to(dot_pos)
 		if d_enemy < float(e["radius"]) + DOT_RADIUS + NEAR_MISS_RADIUS and d_enemy > float(e["radius"]) + DOT_RADIUS and not _is_invulnerable():
 			if not e.get("near_miss", false):
@@ -2012,7 +2049,6 @@ func _on_boss_killed(at: Vector2) -> void:
 		powerups.append({"pos": at + Vector2(randf_range(-70, 70), randf_range(-70, 70)),
 			"type": types[randi() % types.size()], "age": 0.0})
 
-# NEW: split _die() into slow-mo trigger and finalize
 func _die() -> void:
 	if state != State.PLAY: return
 	if current_mode == "duel": return
@@ -2030,7 +2066,6 @@ func _die() -> void:
 		wave_delay_timer = 0.0
 		_start_wave()
 		return
-	# NEW: brief dramatic slow-mo before game-over
 	_burst(dot_pos, Color(1.0, 0.2, 0.25), 60)
 	shake = 26.0 if settings["screen_shake"] else 0.0
 	_play_sfx("death")
@@ -2146,6 +2181,9 @@ func _load_scores() -> void:
 					if mode != "speedrun": arr.reverse()
 					while arr.size() > 10: arr.pop_back()
 					scores[mode] = arr
+		# NEW: load the daily bonus day so it isn't re-awarded every launch
+		if data.has("last_daily_bonus_day"):
+			_last_daily_bonus_day = int(data["last_daily_bonus_day"])
 	for aid in achievements_unlocked:
 		_grant_achievement_skin(aid)
 	if not "classic" in owned_skins: owned_skins.append("classic")
@@ -2176,7 +2214,6 @@ func _save_scores() -> void:
 		"tutorial_seen": tutorial_seen,
 		"current_slot": current_slot,
 		"classic_checkpoints": classic_checkpoints,
-		# NEW: persist daily bonus state
 		"last_daily_bonus_day": _last_daily_bonus_day,
 	}
 	f.store_string(JSON.stringify(save_data))
@@ -2260,7 +2297,7 @@ func _draw_casing_details() -> void:
 		draw_line(Vector2(screen.x - 110, vy + 3), Vector2(screen.x - 20, vy + 3), Color(0.6, 0.55, 0.45), 1.0)
 	draw_string(font, Vector2(18, screen.y - 14), "AT-9000  \u2122",
 		HORIZONTAL_ALIGNMENT_LEFT, -1, 16, Color(0.32, 0.28, 0.20))
-	draw_string(font, Vector2(18, screen.y - 30), "CURSOR CHAOS SYSTEMS",
+	draw_string(font, Vector2(18, screen.y - 30), "DOT CHAOS SYSTEMS",
 		HORIZONTAL_ALIGNMENT_LEFT, -1, 11, Color(0.4, 0.35, 0.25))
 	var bs := Vector2(36, 22); var bc := screen.x * 0.5
 	var bxs := [bc - 60, bc, bc + 60]
@@ -2424,7 +2461,6 @@ func _draw_achv_icon(center: Vector2, size: float, col: Color) -> void:
 	draw_rect(Rect2(center.x - 3, cr.end.y, 6, size*0.15), col)
 	draw_rect(Rect2(center.x - cw*0.4, cr.end.y + size*0.15, cw*0.8, 3), col)
 
-# NEW: quit icon (power symbol)
 func _draw_quit_icon(center: Vector2, size: float, col: Color) -> void:
 	var r := size * 0.35
 	draw_arc(center + Vector2(0, 2), r, PI * 0.3, PI * 1.7, 20, col, 2.5)
@@ -2461,7 +2497,7 @@ func _draw() -> void:
 	var off := Vector2.ZERO
 	if shake > 0.0 and settings["screen_shake"]:
 		off = Vector2(randf_range(-shake, shake), randf_range(-shake, shake))
-	draw_set_transform(off, 0.0, Vector2.ONE)
+	draw_set_transform(view_offset + off * view_scale, 0.0, Vector2(view_scale, view_scale))
 	_draw_casing_background()
 	match state:
 		State.MENU: _draw_background(); _draw_menu()
@@ -2484,13 +2520,13 @@ func _draw() -> void:
 					if settings["show_fps"]: _draw_fps()
 					_draw_pause()
 				_: _draw_over()
-	draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
+	draw_set_transform(view_offset, 0.0, Vector2(view_scale, view_scale))
 	_draw_toast()
 	_draw_streak_callout()
+	draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
 	if fade_alpha > 0.0:
-		draw_rect(Rect2(Vector2.ZERO, screen), Color(0, 0, 0, fade_alpha))
+		draw_rect(Rect2(Vector2.ZERO, get_viewport_rect().size), Color(0, 0, 0, fade_alpha))
 
-# NEW: streak callout rendering
 func _draw_streak_callout() -> void:
 	if streak_callout_timer <= 0.0 or streak_callout_text == "": return
 	var a: float = clampf(streak_callout_timer / 0.4, 0.0, 1.0)
@@ -2501,7 +2537,6 @@ func _draw_streak_callout() -> void:
 	draw_string(font, Vector2((screen.x - w) * 0.5, screen.y * 0.20), streak_callout_text,
 		HORIZONTAL_ALIGNMENT_LEFT, -1, sz, Color(1, 0.85, 0.4, a))
 
-# NEW: floating text particles
 func _draw_text_particles() -> void:
 	for tp in text_particles:
 		var a: float = clampf(float(tp["life"]) / float(tp["max"]), 0.0, 1.0)
@@ -2510,7 +2545,6 @@ func _draw_text_particles() -> void:
 		draw_string(font, (tp["pos"] as Vector2) - Vector2(w * 0.5, 0),
 			tp["text"], HORIZONTAL_ALIGNMENT_LEFT, -1, 14, Color(c.r, c.g, c.b, a))
 
-# NEW: dash trail rendering
 func _draw_dash_trail() -> void:
 	if dash_trail.is_empty(): return
 	var skin: Array = _get_skin(current_skin)
@@ -2522,17 +2556,18 @@ func _draw_dash_trail() -> void:
 func _draw_trail() -> void:
 	if dot_trail.is_empty(): return
 	if current_trail == CUSTOM_TRAIL_ID and custom_trail_texture != null:
-		var ts := custom_trail_texture.get_size()
-		if ts.x > 0 and ts.y > 0:
-			var base := DOT_RADIUS * 1.2 / maxf(ts.x, ts.y)
-			for i in range(dot_trail.size()):
-				var tr: Dictionary = dot_trail[i]
-				var age: float = float(tr["age"])
-				var frac: float = 1.0 - age / TRAIL_LIFE
-				if frac <= 0.0: continue
-				var ds := ts * base * frac
-				draw_texture_rect(custom_trail_texture, Rect2((tr["pos"] as Vector2) - ds * 0.5, ds), false)
-			return
+		# NEW: circular-masked texture, fades and shrinks like other trails
+		var n := dot_trail.size()
+		for i in range(n):
+			var tr: Dictionary = dot_trail[i]
+			var frac: float = 1.0 - float(tr["age"]) / TRAIL_LIFE
+			if frac <= 0.0: continue
+			var d := DOT_RADIUS * 1.6 * frac
+			var ds := Vector2(d, d)
+			draw_texture_rect(custom_trail_texture,
+				Rect2((tr["pos"] as Vector2) - ds * 0.5, ds), false,
+				Color(1, 1, 1, frac))
+		return
 	var trail: Array = _get_trail(current_trail)
 	var style: String = str(trail[3])
 	var colA: Color = trail[4]
@@ -3081,7 +3116,6 @@ func _draw_hud() -> void:
 			draw_rect(Rect2(bar_x, bar_y, bar_w * prog, 5), Color(1.0, 0.75, 0.35))
 			draw_rect(Rect2(bar_x, bar_y, bar_w, 5), Color(1, 1, 1, 0.35), false, 1.0)
 			effect_y = oy + 88.0
-	# NEW: dash cooldown pip
 	if current_mode != "duel":
 		var dc := 1.0 - clampf(dash_cooldown / DASH_COOLDOWN, 0.0, 1.0)
 		var dcx: float = ox
@@ -3096,7 +3130,6 @@ func _draw_hud() -> void:
 		draw_string(font, Vector2(ox, effect_y), "Slow-mo %.1f" % slowmo_timer, HORIZONTAL_ALIGNMENT_LEFT, -1, 14, Color(0.6, 0.3, 1.0)); effect_y += 20.0
 	if magnet_timer > 0.0:
 		draw_string(font, Vector2(ox, effect_y), "Magnet %.1f" % magnet_timer, HORIZONTAL_ALIGNMENT_LEFT, -1, 14, Color(1.0, 0.5, 0.8))
-	# NEW: combo display
 	if combo_count >= 3:
 		var ctxt := "x%d" % combo_count
 		var cw: float = font.get_string_size(ctxt, HORIZONTAL_ALIGNMENT_LEFT, -1, 24).x
@@ -3278,7 +3311,7 @@ func _draw_classic_slots() -> void:
 				"Starting fresh from Wave 1", HORIZONTAL_ALIGNMENT_LEFT, -1, 11, Color(0.5, 0.5, 0.55))
 		var pbx := rect.end.x - pb_w - 20
 		var play_btn := Rect2(pbx, rect.position.y + (row_h - pb_h) * 0.5, pb_w, pb_h)
-		var phov := play_btn.has_point(get_global_mouse_position())
+		var phov := play_btn.has_point(_mouse_virtual())
 		draw_rect(play_btn, Color(0.25, 0.35, 0.28) if phov else Color(0.18, 0.28, 0.22))
 		draw_rect(play_btn, Color(0.4, 1.0, 0.5) if phov else Color(0.3, 0.8, 0.4), false, 2.0)
 		var plbl := "\u25B6 Play"
@@ -3288,7 +3321,7 @@ func _draw_classic_slots() -> void:
 		classic_slot_rects.append({"rect": play_btn, "slot": sn})
 		if checkpoint > 0:
 			var new_btn := Rect2(pbx - nb_w - 10, rect.position.y + (row_h - pb_h) * 0.5, nb_w, pb_h)
-			var nhov := new_btn.has_point(get_global_mouse_position())
+			var nhov := new_btn.has_point(_mouse_virtual())
 			draw_rect(new_btn, Color(0.35, 0.25, 0.25) if nhov else Color(0.22, 0.18, 0.18))
 			draw_rect(new_btn, Color(1, 0.5, 0.5) if nhov else Color(0.6, 0.35, 0.4), false, 2.0)
 			var nlbl := "\u21BB New"
@@ -3418,7 +3451,7 @@ func _draw_skins_grid() -> void:
 		draw_string(font, Vector2(crect.position.x + (cw - cnw) * 0.5, crect.position.y + ch * 0.62), cnm, HORIZONTAL_ALIGNMENT_LEFT, -1, cnsz, Color(1, 1, 1))
 		var cstatus := ""; var cscol := Color(0.9, 0.8, 0.4)
 		if cequipped: cstatus = "Equipped"; cscol = Color(0.4, 1.0, 0.5)
-		elif cowned: cstatus = "Owned"; cscol = Color(0.6, 0.8, 1.0)
+		elif cowned: cstatus = "Change"; cscol = Color(0.6, 0.8, 1.0)
 		else:
 			cstatus = "$%d" % CUSTOM_ORB_PRICE
 			if not ccan_buy: cscol = Color(0.6, 0.4, 0.4)
@@ -3530,7 +3563,7 @@ func _draw_trails_grid() -> void:
 		draw_string(font, Vector2(crect.position.x + (cw - cnw) * 0.5, crect.position.y + ch * 0.62), cnm, HORIZONTAL_ALIGNMENT_LEFT, -1, cnsz, Color(1, 1, 1))
 		var cstatus := ""; var cscol := Color(0.9, 0.8, 0.4)
 		if cequipped: cstatus = "Equipped"; cscol = Color(0.4, 1.0, 0.5)
-		elif cowned: cstatus = "Owned"; cscol = Color(0.6, 0.8, 1.0)
+		elif cowned: cstatus = "Change"; cscol = Color(0.6, 0.8, 1.0)
 		else:
 			cstatus = "$%d" % CUSTOM_TRAIL_PRICE
 			if not ccan_buy: cscol = Color(0.6, 0.4, 0.4)
@@ -3649,7 +3682,6 @@ func _draw_toast() -> void:
 	draw_rect(tr, Color(1, 0.85, 0.4, a), false, 2.0)
 	draw_string(font, Vector2((screen.x - tw) * 0.5, 76), toast_message, HORIZONTAL_ALIGNMENT_LEFT, -1, 20, Color(1, 1, 1, a))
 
-# NEW: find cheapest unowned skin/trail for the "Next unlock" tease
 func _next_unlock_hint() -> Dictionary:
 	var best_price := 999999
 	var best_name := ""
@@ -3670,15 +3702,14 @@ func _next_unlock_hint() -> Dictionary:
 	return {"price": best_price, "name": best_name}
 
 func _draw_menu() -> void:
-	var tw: float = font.get_string_size("Cursor Chaos", HORIZONTAL_ALIGNMENT_LEFT, -1, 54).x
-	draw_string(font, Vector2((screen.x - tw) * 0.5, 140), "Cursor Chaos", HORIZONTAL_ALIGNMENT_LEFT, -1, 54, Color(1.0, 0.25, 0.3))
+	var tw: float = font.get_string_size("Dot Chaos", HORIZONTAL_ALIGNMENT_LEFT, -1, 54).x
+	draw_string(font, Vector2((screen.x - tw) * 0.5, 140), "Dot Chaos", HORIZONTAL_ALIGNMENT_LEFT, -1, 54, Color(1.0, 0.25, 0.3))
 	var sub := "Clear every enemy. Bait the hazards. Survive."
 	var sw: float = font.get_string_size(sub, HORIZONTAL_ALIGNMENT_LEFT, -1, 18).x
 	draw_string(font, Vector2((screen.x - sw) * 0.5, 168), sub, HORIZONTAL_ALIGNMENT_LEFT, -1, 18, Color(0.85, 0.75, 0.85))
 	var mtxt := "$%d" % money
 	var mw: float = font.get_string_size(mtxt, HORIZONTAL_ALIGNMENT_LEFT, -1, 26).x
 	draw_string(font, Vector2(screen.x - mw - UI_MARGIN, UI_MARGIN + 20), mtxt, HORIZONTAL_ALIGNMENT_LEFT, -1, 26, Color(1, 0.85, 0.4))
-	# NEW: next unlock tease
 	var hint := _next_unlock_hint()
 	if hint["price"] < 999999 and hint["name"] != "":
 		var htxt := "Next: %s ($%d)" % [hint["name"], hint["price"]]
@@ -3689,23 +3720,23 @@ func _draw_menu() -> void:
 	var shopb := Rect2(sxx, UI_MARGIN, sb, sb)
 	var achvb := Rect2(sxx, UI_MARGIN + sb + 12, sb, sb)
 	var settb := Rect2(sxx, UI_MARGIN + (sb + 12) * 2, sb, sb)
-	var quitb := Rect2(sxx, UI_MARGIN + (sb + 12) * 3, sb, sb)  # NEW
+	var quitb := Rect2(sxx, UI_MARGIN + (sb + 12) * 3, sb, sb)
 	menu_button_rects["shop"] = shopb; menu_button_rects["achievements"] = achvb
 	menu_button_rects["settings"] = settb; menu_button_rects["quit"] = quitb
-	var sh := shopb.has_point(get_global_mouse_position())
+	var m := _mouse_virtual()
+	var sh := shopb.has_point(m)
 	draw_rect(shopb, Color(0.20, 0.20, 0.26, 0.9) if not sh else Color(0.30, 0.24, 0.32, 0.95))
 	draw_rect(shopb, Color(1, 0.85, 0.4, 1.0) if sh else Color(1, 0.85, 0.4, 0.6), false, 2.0)
 	_draw_shop_icon(shopb.get_center(), 30.0, Color(1, 0.85, 0.4))
-	var ah := achvb.has_point(get_global_mouse_position())
+	var ah := achvb.has_point(m)
 	draw_rect(achvb, Color(0.20, 0.20, 0.26, 0.9) if not ah else Color(0.30, 0.24, 0.32, 0.95))
 	draw_rect(achvb, Color(1, 0.85, 0.4, 1.0) if ah else Color(1, 0.85, 0.4, 0.6), false, 2.0)
 	_draw_achv_icon(achvb.get_center(), 30.0, Color(1, 0.85, 0.4))
-	var sth := settb.has_point(get_global_mouse_position())
+	var sth := settb.has_point(m)
 	draw_rect(settb, Color(0.20, 0.20, 0.26, 0.9) if not sth else Color(0.30, 0.24, 0.32, 0.95))
 	draw_rect(settb, Color(1, 1, 1, 1.0) if sth else Color(1, 1, 1, 0.6), false, 2.0)
 	_draw_settings_icon(settb.get_center(), 30.0, Color(1, 1, 1))
-	# NEW: quit button
-	var qh := quitb.has_point(get_global_mouse_position())
+	var qh := quitb.has_point(m)
 	draw_rect(quitb, Color(0.20, 0.14, 0.14, 0.9) if not qh else Color(0.34, 0.18, 0.18, 0.95))
 	draw_rect(quitb, Color(1, 0.4, 0.4, 1.0) if qh else Color(1, 0.4, 0.4, 0.6), false, 2.0)
 	_draw_quit_icon(quitb.get_center(), 30.0, Color(1, 0.4, 0.4))
@@ -3719,24 +3750,23 @@ func _draw_menu() -> void:
 	var bh := 58.0; var gap := 10.0
 	var sy := 200.0
 	for i in modes.size():
-		var m: Dictionary = modes[i]
+		var md: Dictionary = modes[i]
 		var r := Rect2((screen.x - bw) * 0.5, sy + i * (bh + gap), bw, bh)
-		menu_button_rects[m["id"]] = r
-		var hov := r.has_point(get_global_mouse_position())
+		menu_button_rects[md["id"]] = r
+		var hov := r.has_point(m)
 		draw_rect(r, Color(0.16, 0.16, 0.22, 0.9) if not hov else Color(0.28, 0.22, 0.30, 0.9))
 		draw_rect(r, Color(1, 1, 1) if hov else Color(1.0, 0.30, 0.35), false, 2.0)
-		draw_string(font, Vector2(r.position.x + 22, r.position.y + 26), m["label"], HORIZONTAL_ALIGNMENT_LEFT, -1, 22, Color(1, 1, 1))
-		draw_string(font, Vector2(r.position.x + 22, r.position.y + 46), m["desc"], HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color(0.65, 0.65, 0.72))
-		if m["id"] != "duel":
-			var bv := _best(m["id"])
+		draw_string(font, Vector2(r.position.x + 22, r.position.y + 26), md["label"], HORIZONTAL_ALIGNMENT_LEFT, -1, 22, Color(1, 1, 1))
+		draw_string(font, Vector2(r.position.x + 22, r.position.y + 46), md["desc"], HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color(0.65, 0.65, 0.72))
+		if md["id"] != "duel":
+			var bv := _best(md["id"])
 			var bs := "Best: —"
 			if bv > 0.0:
-				if m["id"] == "classic": bs = "Best: W%d" % int(bv)
-				elif m["id"] == "waveless": bs = "Best: %d kills" % int(bv)
+				if md["id"] == "classic": bs = "Best: W%d" % int(bv)
+				elif md["id"] == "waveless": bs = "Best: %d kills" % int(bv)
 				else: bs = "Best: %s" % _fmt_time(bv)
 			var bsw: float = font.get_string_size(bs, HORIZONTAL_ALIGNMENT_LEFT, -1, 12).x
 			draw_string(font, Vector2(r.position.x + r.size.x - bsw - 16, r.position.y + 32), bs, HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color(1.0, 0.85, 0.4))
-	# NEW: stat cards bottom-center
 	if screen.y > 620:
 		var stats_y := screen.y - UI_MARGIN - 40
 		var stat_lines := [
@@ -3763,6 +3793,7 @@ func _draw_settings() -> void:
 	var rh := 36.0
 	draw_string(font, Vector2(clx, sy - 8), "Options", HORIZONTAL_ALIGNMENT_LEFT, -1, 18, Color(0.9, 0.7, 0.3))
 	settings_rows.clear()
+	var m := _mouse_virtual()
 	var tg := [
 		{"key": "sfx", "label": "Sound Effects", "type": "toggle"},
 		{"key": "music", "label": "Music", "type": "toggle"},
@@ -3777,14 +3808,14 @@ func _draw_settings() -> void:
 		var r: Dictionary = tg[i]
 		var rect := Rect2(clx, y, cw, rh - 6)
 		settings_rows[r["key"]] = rect
-		var hov := rect.has_point(get_global_mouse_position())
+		var hov := rect.has_point(m)
 		draw_rect(rect, Color(0.14, 0.14, 0.18) if not hov else Color(0.22, 0.18, 0.24))
 		draw_rect(rect, Color(0.6, 0.6, 0.7), false, 1.5)
 		draw_string(font, Vector2(rect.position.x + 14, rect.position.y + 22), r["label"], HORIZONTAL_ALIGNMENT_LEFT, -1, 16, Color(1, 1, 1))
 		if r["type"] == "cycle":
 			var rr := Rect2(rect.position.x + rect.size.x - 30, rect.position.y + (rh - 6) * 0.5 - 11, 22, 22)
 			bg_refresh_rect = rr
-			var rhov := rr.has_point(get_global_mouse_position())
+			var rhov := rr.has_point(m)
 			_draw_refresh_icon(rr.get_center(), 8.0, Color(1, 1, 1) if rhov else (Color(0.6, 0.85, 1.0) if custom_bg_path != "" else Color(0.5, 0.5, 0.6)))
 			var bn := ""
 			if settings["background"] == "custom":
@@ -3818,7 +3849,7 @@ func _draw_settings() -> void:
 		var a: Dictionary = as_[i]
 		var rect := Rect2(crx, y, cw, rh - 6)
 		audio_row_rects[a["key"]] = rect
-		var hov := rect.has_point(get_global_mouse_position())
+		var hov := rect.has_point(m)
 		draw_rect(rect, Color(0.14, 0.14, 0.18) if not hov else Color(0.22, 0.18, 0.24))
 		draw_rect(rect, Color(0.6, 0.6, 0.7), false, 1.5)
 		draw_string(font, Vector2(rect.position.x + 14, rect.position.y + 14), a["label"], HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color(0.75, 0.75, 0.85))
@@ -3833,7 +3864,7 @@ func _draw_settings() -> void:
 		draw_string(font, Vector2(rect.position.x + 14, rect.position.y + 28), dn, HORIZONTAL_ALIGNMENT_LEFT, -1, 10, dc)
 		var rr := Rect2(rect.position.x + rect.size.x - 34, rect.position.y + (rh - 6) * 0.5 - 11, 22, 22)
 		audio_refresh_rects[a["key"]] = rr
-		var rhov := rr.has_point(get_global_mouse_position())
+		var rhov := rr.has_point(m)
 		_draw_refresh_icon(rr.get_center(), 8.0, Color(1, 1, 1) if rhov else (Color(0.4, 1.0, 0.5) if custom_streams.has(a["key"]) else Color(0.5, 0.5, 0.6)))
 		y += rh
 	draw_string(font, Vector2(crx, screen.y - 130), "Click a row to load a file. Click the arrow to reset.", HORIZONTAL_ALIGNMENT_LEFT, -1, 11, Color(0.55, 0.55, 0.65))
@@ -3849,7 +3880,7 @@ func _draw_refresh_icon(center: Vector2, radius: float, col: Color) -> void:
 	draw_colored_polygon(PackedVector2Array([tip, tip - tan * 4.0 + nor * 4.0, tip - tan * 4.0 - nor * 4.0]), col)
 
 func _draw_button(r: Rect2, label: String) -> void:
-	var hov := r.has_point(get_global_mouse_position())
+	var hov := r.has_point(_mouse_virtual())
 	draw_rect(r, Color(0.20, 0.20, 0.26) if not hov else Color(0.30, 0.24, 0.32))
 	draw_rect(r, Color(1.0, 0.35, 0.4) if hov else Color(1.0, 0.25, 0.30), false, 2.0)
 	var lw: float = font.get_string_size(label, HORIZONTAL_ALIGNMENT_LEFT, -1, 18).x

@@ -13,7 +13,6 @@ config_version=5
 config/name="Cursor Chaos"
 run/main_scene="uid://cpmgfw0vg8qd4"
 config/features=PackedStringArray("4.6", "Mobile")
-config/icon="res://icon.svg"
 
 [physics]
 
